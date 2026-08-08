@@ -408,3 +408,78 @@ def grounding_flops_saved(n_candidates, n_verified, n_entities, sample_size=500,
     cost_emvr = n_candidates * (sample_size * avg_degree) + n_verified * (n_entities ** 2)
     saved_pct = 1.0 - (cost_emvr / cost_lesr) if cost_lesr > 0 else 0.0
     return {"cost_lesr": cost_lesr, "cost_emvr": cost_emvr, "pct_saved": saved_pct}
+
+
+# --------------------------------------------------------------------------
+# Rule-quality metrics (Sec. VI-B / XIII-C of the base paper; matches He et
+# al. 2026's definitions of HCR, RCS, RQI as used for the WD15K interpretability
+# comparison, Table 8).
+# --------------------------------------------------------------------------
+
+def high_confidence_rule_ratio(learned_weights, threshold):
+    """
+    HCR = (# rules with post-training significance weight > threshold) / (# total learned rules).
+    This is computable directly from a single trained ReasonerModel's weights,
+    no external annotation needed. Returns a percentage (0-100), matching the
+    base paper's Table 8 reporting convention.
+
+    `learned_weights` should be the *logical-rule* weights only (i.e. excluding
+    the trailing KGE-embedding slot) -- pass learned_weights[:-1] if you loaded
+    the full softmax vector saved by lesr.py.
+    threshold: theta_hi in the base paper. There is no single "correct" value;
+    report whatever threshold you use alongside the number (0.5 is the
+    illustrative value used in the EMVR-KBC proposal's Filtering Recall example).
+    """
+    w = np.asarray(learned_weights, dtype=float)
+    if len(w) == 0:
+        return 0.0
+    n_high_conf = int(np.sum(w > threshold))
+    return 100.0 * n_high_conf / len(w)
+
+
+def rule_clarity_score(rule_texts, annotations):
+    """
+    RCS of a single rule = average interpretability score (0, 0.5, or 1) of its
+    sampled real paths, as hand-labeled by human annotators (Lv et al. 2021).
+    RCS of a model = average RCS across its high-confidence rules.
+
+    This metric is NOT computable from your own run -- it requires the actual
+    WD15K human interpretability annotation data (Lv et al., "Is multi-hop
+    reasoning really explainable?", EMNLP 2021). It only applies to WD15K,
+    since that's the only one of the five benchmark datasets with these
+    annotations available.
+
+    `annotations` must be a dict: {rule_text: [score, score, ...]} where each
+    score is 0, 0.5, or 1, one entry per sampled path for that rule. If you
+    don't have this file, pass annotations=None and this function returns
+    None -- callers should report "N/A (requires WD15K human annotations)"
+    rather than fabricating a number.
+    """
+    if annotations is None:
+        return None
+    per_rule_scores = []
+    for rt in rule_texts:
+        paths = annotations.get(rt)
+        if paths:
+            per_rule_scores.append(float(np.mean(paths)))
+    if not per_rule_scores:
+        return None
+    return float(np.mean(per_rule_scores))
+
+
+def rule_quality_index(hcr_pct, rcs):
+    """
+    RQI = harmonic mean of HCR (as a 0-100 percentage) and RCS (as a 0-1 score,
+    rescaled to 0-100 for consistency with the base paper's Table 8 values,
+    e.g. LeSR GPT-3.5: HCR=51.13, RCS=0.428, RQI=46.60).
+
+    Returns None if RCS is unavailable (see rule_clarity_score) -- RQI cannot
+    be honestly computed without it, and should be reported as N/A rather
+    than silently substituting a proxy.
+    """
+    if rcs is None or hcr_pct is None or hcr_pct <= 0:
+        return None
+    rcs_pct = rcs * 100.0
+    if rcs_pct <= 0:
+        return None
+    return 2 * hcr_pct * rcs_pct / (hcr_pct + rcs_pct)
