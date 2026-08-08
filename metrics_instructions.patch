@@ -1,0 +1,166 @@
+--- EMVR-KBC-orig/lesr.py	2026-08-08 05:02:13.043134706 +0000
++++ EMVR-KBC-new/lesr.py	2026-08-08 04:57:14.414239457 +0000
+@@ -255,6 +255,13 @@
+         return 0
+     reasoner_dir = os.path.join(args.run_dir, "reasoner")
+     make_dir(reasoner_dir)
++    # ---------------- timing/memory instrumentation (NEW) ----------------
++    reasoner_stage_start_time = time.time()
++    total_grounding_time = 0.0
++    total_training_time = 0.0
++    if RUN_USE_CUDA:
++        torch.cuda.reset_peak_memory_stats()
++    # -----------------------------------------------------------------------
+     print("\n the followiong relations has no subgraphs:", relation_wo_subgraphs)
+     relation_wo_logicrules = []
+     for relation in all_relations_:
+@@ -376,7 +383,9 @@
+                     continue
+             # -------------------------------------------------------------------------
+ 
++            _grounding_t0 = time.time()
+             train_aligned_masks, train_chained_masks, train_ground_results,train_ground_rconds = ground_rules_over_kg_semantic(train_sparse, checked_rules, relation2id_dict, similarity_matrix,verbose=False)
++            total_grounding_time += time.time() - _grounding_t0
+             checked_rules, train_aligned_masks, train_chained_masks, train_ground_results,train_ground_rconds = keep_good_rules(checked_rules, train_aligned_masks, train_chained_masks, train_ground_results,train_ground_rconds,verbose=args.debug, criteria=args.good_rule_criteria)
+             if args.use_emvr and len(emvr_ev_by_text) > 0:
+                 # persisted regardless of emvr_save_stats: the reasoner-training loop
+@@ -389,11 +398,15 @@
+             save_grounding_results(grnd_save_prefix+"_train", train_aligned_masks, train_chained_masks, train_ground_results, train_ground_rconds)
+             logging.info("ground over train kg arr for relation {}={}".format(relation_wk_idx, relation_text))
+             test_sparse = convert_arr_to_sparse_coo(train_test_arr, n_entities, n_relations)
++            _grounding_t0 = time.time()
+             test_aligned_masks, test_chained_masks, test_ground_results,test_ground_rconds = ground_rules_over_kg_semantic(test_sparse, checked_rules, relation2id_dict, similarity_matrix,verbose=False)
++            total_grounding_time += time.time() - _grounding_t0
+             save_grounding_results(grnd_save_prefix+"_test", test_aligned_masks, test_chained_masks, test_ground_results,test_ground_rconds)
+             logging.info("ground over train+test kg arr for relation {}={}".format(relation_wk_idx, relation_text))
+             valid_sparse = convert_arr_to_sparse_coo(train_valid_arr, n_entities, n_relations)
++            _grounding_t0 = time.time()
+             valid_aligned_masks, valid_chained_masks, valid_ground_results,valid_ground_rconds = ground_rules_over_kg_semantic(valid_sparse, checked_rules,relation2id_dict, similarity_matrix,verbose=False)
++            total_grounding_time += time.time() - _grounding_t0
+             save_grounding_results(grnd_save_prefix+"_valid", valid_aligned_masks, valid_chained_masks, valid_ground_results,valid_ground_rconds)
+             logging.info("ground over train+valid kg arr for relation {}={}".format(relation_wk_idx, relation_text))
+             save_nested_list(checked_rules, checked_rules_fname)
+@@ -526,6 +539,7 @@
+                     if args.use_reasoner_plus:
+                         best_learned_alpha = 0
+                     no_improvement_counter = 0
++                    _training_t0 = time.time()
+                     for epoch in range(args.num_epochs):
+                         model, valid_loss = train_loop(model, epoch, optimizer, scheduler, trainset_scores, validset_scores, epsilon=epsilon,verbose=True)
+                         if valid_loss < best_valid_loss:
+@@ -539,6 +553,7 @@
+                         if no_improvement_counter >= args.early_stop_patience:
+                             print("Early stopping as validation loss did not improve for {} epochs.".format(args.early_stop_patience))
+                             break
++                    total_training_time += time.time() - _training_t0
+                     print("[{}] Model trained for {} epoches".format(time.strftime("%Y-%m-%d %H:%M"), epoch))                    
+                     learned_weights = best_learned_weights
+                     torch.save(learned_weights, learned_weights_fname)
+@@ -628,6 +643,26 @@
+         print("")
+     else:
+         print("no learnable logical rules for the given relations!")
++
++    # ---------------- timing/memory instrumentation (NEW) ----------------
++    reasoner_stage_wall_time = time.time() - reasoner_stage_start_time
++    peak_memory_mb = None
++    if RUN_USE_CUDA:
++        peak_memory_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
++    timing_summary = {
++        "reasoner_stage_wall_time_sec": reasoner_stage_wall_time,
++        "total_grounding_time_sec": total_grounding_time,
++        "total_training_time_sec": total_training_time,
++        "peak_gpu_memory_mb": peak_memory_mb,
++    }
++    with open(os.path.join(reasoner_dir, "_timing_memory.json"), "w") as f:
++        json.dump(timing_summary, f, indent=2)
++    print("\n[TIMING/MEMORY] wall_time={:.1f}s | grounding_time={:.1f}s | "
++          "training_time={:.1f}s | peak_gpu_mem={}".format(
++              reasoner_stage_wall_time, total_grounding_time, total_training_time,
++              "{:.1f}MB".format(peak_memory_mb) if peak_memory_mb is not None else "N/A (CPU run)"))
++    # -----------------------------------------------------------------------
++
+     print("\nall done... sleep tight\n")
+     return 0
+ 
+--- EMVR-KBC-orig/evidence.py	2026-08-08 05:02:13.043134706 +0000
++++ EMVR-KBC-new/evidence.py	2026-08-08 04:56:28.233864900 +0000
+@@ -408,3 +408,78 @@
+     cost_emvr = n_candidates * (sample_size * avg_degree) + n_verified * (n_entities ** 2)
+     saved_pct = 1.0 - (cost_emvr / cost_lesr) if cost_lesr > 0 else 0.0
+     return {"cost_lesr": cost_lesr, "cost_emvr": cost_emvr, "pct_saved": saved_pct}
++
++
++# --------------------------------------------------------------------------
++# Rule-quality metrics (Sec. VI-B / XIII-C of the base paper; matches He et
++# al. 2026's definitions of HCR, RCS, RQI as used for the WD15K interpretability
++# comparison, Table 8).
++# --------------------------------------------------------------------------
++
++def high_confidence_rule_ratio(learned_weights, threshold):
++    """
++    HCR = (# rules with post-training significance weight > threshold) / (# total learned rules).
++    This is computable directly from a single trained ReasonerModel's weights,
++    no external annotation needed. Returns a percentage (0-100), matching the
++    base paper's Table 8 reporting convention.
++
++    `learned_weights` should be the *logical-rule* weights only (i.e. excluding
++    the trailing KGE-embedding slot) -- pass learned_weights[:-1] if you loaded
++    the full softmax vector saved by lesr.py.
++    threshold: theta_hi in the base paper. There is no single "correct" value;
++    report whatever threshold you use alongside the number (0.5 is the
++    illustrative value used in the EMVR-KBC proposal's Filtering Recall example).
++    """
++    w = np.asarray(learned_weights, dtype=float)
++    if len(w) == 0:
++        return 0.0
++    n_high_conf = int(np.sum(w > threshold))
++    return 100.0 * n_high_conf / len(w)
++
++
++def rule_clarity_score(rule_texts, annotations):
++    """
++    RCS of a single rule = average interpretability score (0, 0.5, or 1) of its
++    sampled real paths, as hand-labeled by human annotators (Lv et al. 2021).
++    RCS of a model = average RCS across its high-confidence rules.
++
++    This metric is NOT computable from your own run -- it requires the actual
++    WD15K human interpretability annotation data (Lv et al., "Is multi-hop
++    reasoning really explainable?", EMNLP 2021). It only applies to WD15K,
++    since that's the only one of the five benchmark datasets with these
++    annotations available.
++
++    `annotations` must be a dict: {rule_text: [score, score, ...]} where each
++    score is 0, 0.5, or 1, one entry per sampled path for that rule. If you
++    don't have this file, pass annotations=None and this function returns
++    None -- callers should report "N/A (requires WD15K human annotations)"
++    rather than fabricating a number.
++    """
++    if annotations is None:
++        return None
++    per_rule_scores = []
++    for rt in rule_texts:
++        paths = annotations.get(rt)
++        if paths:
++            per_rule_scores.append(float(np.mean(paths)))
++    if not per_rule_scores:
++        return None
++    return float(np.mean(per_rule_scores))
++
++
++def rule_quality_index(hcr_pct, rcs):
++    """
++    RQI = harmonic mean of HCR (as a 0-100 percentage) and RCS (as a 0-1 score,
++    rescaled to 0-100 for consistency with the base paper's Table 8 values,
++    e.g. LeSR GPT-3.5: HCR=51.13, RCS=0.428, RQI=46.60).
++
++    Returns None if RCS is unavailable (see rule_clarity_score) -- RQI cannot
++    be honestly computed without it, and should be reported as N/A rather
++    than silently substituting a proxy.
++    """
++    if rcs is None or hcr_pct is None or hcr_pct <= 0:
++        return None
++    rcs_pct = rcs * 100.0
++    if rcs_pct <= 0:
++        return None
++    return 2 * hcr_pct * rcs_pct / (hcr_pct + rcs_pct)
