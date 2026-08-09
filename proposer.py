@@ -139,6 +139,7 @@ def gemini15_proposing_rules(llm_inputs, model, verbose=True):
     proposed_rules = []
     completion_results = []
     counter, count_interval = 0, 100
+    consecutive_rate_limit_hits = 0
     # for llm_input in llm_inputs:
     for llm_input in llm_inputs:
         if verbose and counter % count_interval == 0:
@@ -163,10 +164,25 @@ def gemini15_proposing_rules(llm_inputs, model, verbose=True):
 
                 # Small delay between successful requests
                 time.sleep(30)
+                consecutive_rate_limit_hits = 0
                 break
             except ResourceExhausted as e:
+                consecutive_rate_limit_hits += 1
+                if consecutive_rate_limit_hits >= 3:
+                    print("\n========================================")
+                    print("Gemini rate limit hit 3 times in a row (~3+ minutes with no")
+                    print("progress). This usually means the DAILY quota is exhausted, not")
+                    print("just a per-minute limit -- retrying forever won't help.")
+                    print("Stop this run (Ctrl+C), switch LLM_API_KEY to a different")
+                    print("account, and rerun the SAME --run_proposer command -- it will")
+                    print("resume from this exact relation, no work is lost.")
+                    print("========================================\n")
+                    raise SystemExit(
+                        "Gemini daily quota likely exhausted -- switch API keys and rerun "
+                        "the same --run_proposer command to resume."
+                    )
                 print("\n========================================")
-                print("Gemini rate limit reached.")
+                print("Gemini rate limit reached ({} in a row).".format(consecutive_rate_limit_hits))
                 print("Waiting 60 seconds before retrying...")
                 print("========================================\n")
                 time.sleep(60)
@@ -236,7 +252,7 @@ def llm_propose_rule(llm_inputs, model_name, save_dir, save_pfx, api_key,save_pi
         if verbose: print("batch API call completed. ")
     elif model_name in ["Gemini15", "gemini15"]:
         gemini_set_api(api_key)
-        model = genai.GenerativeModel("gemini-3.5-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash-002")
         proposed_rules, chat_results = gemini15_proposing_rules(llm_inputs,model, verbose=verbose)
         if verbose:print("batch API call completed.")
     elif model_name in ["llama3", "llama"]:
