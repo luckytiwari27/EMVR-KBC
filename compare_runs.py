@@ -116,11 +116,19 @@ def aggregate_seeds(per_seed_dicts, keys):
 
 
 def load_rule_texts(run_dir, rid):
+    """_rules.json is JSON Lines (one JSON array per line), written by
+    lesr.py's save_nested_list -- NOT a single JSON document. Must be parsed
+    line by line to match load_nested_list() in utils.py, or json.load()
+    throws 'Extra data' on the second line onward."""
     fname = os.path.join(run_dir, "reasoner", "{}_rules.json".format(rid))
     if not os.path.exists(fname):
         return []
+    rules = []
     with open(fname) as f:
-        rules = json.load(f)
+        for line in f:
+            line = line.strip()
+            if line:
+                rules.append(json.loads(line))
     return [r[0] for r in rules]
 
 
