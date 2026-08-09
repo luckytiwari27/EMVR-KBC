@@ -60,6 +60,20 @@ def load_run_dirs(arg):
     return dirs
 
 
+# Published LeSR paper numbers (GPT-3.5 w/ Weight Learning), Tables V-VII,
+# He et al. 2026, IEEE TASLP. Hardcoded from the paper text -- not fetched,
+# not computed, just a reference point printed alongside your own runs so
+# you can see all three side by side. None of this is generated from your
+# runs, so it never changes based on what you actually ran.
+PAPER_REFERENCE = {
+    "UMLs":       {"mr": 4.1,    "mrr": 0.764, "hit1": 0.682, "hit3": 0.815, "hit10": 0.918},
+    "WN18RR":     {"mr": 1989.0, "mrr": 0.497, "hit1": 0.440, "hit3": 0.523, "hit10": 0.610},
+    "FB15K":      {"mr": 124.3,  "mrr": 0.420, "hit1": 0.327, "hit3": 0.461, "hit10": 0.598},
+    "WD15K":      {"mr": 95.0,   "mrr": 0.570, "hit1": 0.453, "hit3": 0.649, "hit10": 0.771},
+    "ConceptNet": {"mr": 5866.5, "mrr": 0.345, "hit1": 0.227, "hit3": 0.419, "hit10": 0.567},
+}
+
+
 def relation_ids_in_run(run_dir):
     reasoner_dir = os.path.join(run_dir, "reasoner")
     ids = []
@@ -269,9 +283,10 @@ if __name__ == "__main__":
             hcr_mean, _ = agg["hcr_emvr"]
             rqi_emvr = rule_quality_index(hcr_mean, rcs_emvr)
 
-    W = 70
+    W = 92
     def line(): print("-" * W)
     seed_note = "{} seed{}".format(n_seeds, "s" if n_seeds > 1 else "")
+    paper = PAPER_REFERENCE.get(args.dataset)
 
     print("=" * W)
     print("{}  --  {}".format(args.dataset, seed_note))
@@ -279,16 +294,49 @@ if __name__ == "__main__":
 
     print("\nCORE TABLE")
     line()
-    print("{:<22}{:>22}{:>22}".format("Metric", "LeSR", "EMVR-KBC"))
-    print("{:<22}{:>22}{:>22}".format("MR (down)", fmt(vanilla_acc["mr"], decimals=4), fmt(emvr_acc["mr"], decimals=4)))
-    print("{:<22}{:>22}{:>22}".format("MRR (up)", fmt(vanilla_acc["mrr"], decimals=4), fmt(emvr_acc["mrr"], decimals=4)))
-    print("{:<22}{:>22}{:>22}".format("Hits@1 (up)", fmt(vanilla_acc["hit1"], pct=True, decimals=2), fmt(emvr_acc["hit1"], pct=True, decimals=2)))
-    print("{:<22}{:>22}{:>22}".format("Hits@3 (up)", fmt(vanilla_acc["hit3"], pct=True, decimals=2), fmt(emvr_acc["hit3"], pct=True, decimals=2)))
-    print("{:<22}{:>22}{:>22}".format("Hits@10 (up)", fmt(vanilla_acc["hit10"], pct=True, decimals=2), fmt(emvr_acc["hit10"], pct=True, decimals=2)))
-    print("{:<22}{:>22}{:>22}".format("# candidate rules", fmt_int(agg["n_candidates"]), fmt_int(agg["n_candidates"])))
-    print("{:<22}{:>22}{:>22}".format("# verified rules", "--", fmt_int(agg["n_verified"])))
-    print("{:<22}{:>22}{:>22}".format("Filtering rate", "--", fmt(agg["filtering_rate"], pct=True, decimals=1)))
-    print("{:<22}{:>22}{:>22}".format("Filtering recall", "--", fmt(agg["filtering_recall"], pct=True, decimals=1)))
+    if paper:
+        print("{:<22}{:>22}{:>22}{:>22}".format("Metric", "Paper (GPT-3.5 w/WL)", "LeSR (yours)", "EMVR-KBC"))
+    else:
+        print("{:<22}{:>22}{:>22}".format("Metric", "LeSR (yours)", "EMVR-KBC"))
+        print("[No published reference available for dataset '{}' -- only UMLs, WN18RR,".format(args.dataset))
+        print(" FB15K, WD15K, ConceptNet have a hardcoded paper reference row.]")
+    line()
+
+    def core_row(label, key, pct=False, decimals=4):
+        if paper:
+            paper_val = paper[key]
+            paper_str = "{:.2f}%".format(paper_val * 100) if pct else "{:.4f}".format(paper_val)
+            print("{:<22}{:>22}{:>22}{:>22}".format(
+                label, paper_str,
+                fmt(vanilla_acc[key], pct=pct, decimals=2 if pct else decimals),
+                fmt(emvr_acc[key], pct=pct, decimals=2 if pct else decimals)))
+        else:
+            print("{:<22}{:>22}{:>22}".format(
+                label,
+                fmt(vanilla_acc[key], pct=pct, decimals=2 if pct else decimals),
+                fmt(emvr_acc[key], pct=pct, decimals=2 if pct else decimals)))
+
+    core_row("MR (down)", "mr")
+    core_row("MRR (up)", "mrr")
+    core_row("Hits@1 (up)", "hit1", pct=True)
+    core_row("Hits@3 (up)", "hit3", pct=True)
+    core_row("Hits@10 (up)", "hit10", pct=True)
+    line()
+    if paper:
+        print("{:<22}{:>22}{:>22}{:>22}".format("# candidate rules", "--", fmt_int(agg["n_candidates"]), fmt_int(agg["n_candidates"])))
+        print("{:<22}{:>22}{:>22}{:>22}".format("# verified rules", "--", "--", fmt_int(agg["n_verified"])))
+        print("{:<22}{:>22}{:>22}{:>22}".format("Filtering rate", "--", "--", fmt(agg["filtering_rate"], pct=True, decimals=1)))
+        print("{:<22}{:>22}{:>22}{:>22}".format("Filtering recall", "--", "--", fmt(agg["filtering_recall"], pct=True, decimals=1)))
+    else:
+        print("{:<22}{:>22}{:>22}".format("# candidate rules", fmt_int(agg["n_candidates"]), fmt_int(agg["n_candidates"])))
+        print("{:<22}{:>22}{:>22}".format("# verified rules", "--", fmt_int(agg["n_verified"])))
+        print("{:<22}{:>22}{:>22}".format("Filtering rate", "--", fmt(agg["filtering_rate"], pct=True, decimals=1)))
+        print("{:<22}{:>22}{:>22}".format("Filtering recall", "--", fmt(agg["filtering_recall"], pct=True, decimals=1)))
+    if paper:
+        print("\n[Paper column is a fixed reference from He et al. 2026 Tables V-VII (GPT-3.5 w/ WL) --")
+        print(" it is not recomputed from anything you ran, and only 'LeSR (yours)' vs 'EMVR-KBC' is a")
+        print(" controlled, apples-to-apples comparison since those two share your rule pool. The Paper")
+        print(" column is a useful sanity check, not a substitute for that controlled comparison.]")
 
     if n_seeds == 1:
         print("\n[WARNING] Single-seed comparison -- no std available. Do not treat any")
