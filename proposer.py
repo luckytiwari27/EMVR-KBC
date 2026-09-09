@@ -32,6 +32,7 @@ Public API is unchanged: lesr.py calls llm_propose_rule(...) exactly as before.
 
 import os
 import pickle
+import re
 import time
 
 import pandas as pd
@@ -39,6 +40,7 @@ import pandas as pd
 from openai import OpenAI
 import google.generativeai as genai
 from groq import Groq
+from groq import RateLimitError as GroqRateLimitError
 from google.api_core.exceptions import (
     ResourceExhausted, NotFound, PermissionDenied, Unauthenticated,
     ServiceUnavailable, InternalServerError, DeadlineExceeded,
@@ -408,6 +410,7 @@ def llama3_proposing_rules(llm_inputs, client, verbose=True):
         print("FUNCTION STARTED {}".format(time.strftime("%Y-%m-%d %H:%M")))
     proposed_rules, completion_results = [], []
     count_interval = 100
+    consecutive_rate_limit_hits = 0
     for counter, llm_input in enumerate(llm_inputs):
         if verbose and counter % count_interval == 0:
             print("\t {} / {} Done: {}".format(counter, len(llm_inputs), time.strftime("%Y-%m-%d %H:%M")))
@@ -420,11 +423,41 @@ def llama3_proposing_rules(llm_inputs, client, verbose=True):
                 output.append(event.data)
             proposed_rules.append("".join(output))
         elif LLAMA_SOURCE == "groq":
-            chat_completion = client.chat.completions.create(
-                messages=[{"role": "user", "content": llm_input}],
-                model="llama-3.3-70b-versatile")
-            proposed_rules.append(chat_completion.choices[0].message.content)
-            completion_results.append(chat_completion)
+            while True:
+                try:
+                    chat_completion = client.chat.completions.create(
+                        messages=[{"role": "user", "content": llm_input}],
+                        model="openai/gpt-oss-120b")
+                    proposed_rules.append(chat_completion.choices[0].message.content)
+                    completion_results.append(chat_completion)
+                    consecutive_rate_limit_hits = 0
+                    break
+                except GroqRateLimitError as e:
+                    consecutive_rate_limit_hits += 1
+                    # Groq's TPM/RPM limits are per-minute rolling windows, so a
+                    # short wait almost always clears it -- try to honour the
+                    # exact wait time the API suggests ("try again in 472.5ms"),
+                    # falling back to a flat few seconds if that can't be parsed.
+                    wait_seconds = 5.0
+                    match = re.search(r"try again in ([\d.]+)(ms|s)", str(e))
+                    if match:
+                        value, unit = float(match.group(1)), match.group(2)
+                        wait_seconds = (value / 1000.0 if unit == "ms" else value) + 0.5
+                    if consecutive_rate_limit_hits >= 10:
+                        print("\n========================================")
+                        print("Groq rate limit hit 10 times in a row -- this is no longer a")
+                        print("normal per-minute rolling-window wait. Check your usage/tier at")
+                        print("https://console.groq.com/settings/billing, or switch to a")
+                        print("different Groq account's API key and rerun the SAME")
+                        print("--run_proposer command -- it resumes from this exact relation.")
+                        print("========================================\n")
+                        raise SystemExit(
+                            "Groq rate limit hit repeatedly -- check quota or switch API keys "
+                            "and rerun the same --run_proposer command to resume."
+                        )
+                    print("Groq rate limit hit ({} in a row) -- waiting {:.1f}s...".format(
+                        consecutive_rate_limit_hits, wait_seconds))
+                    time.sleep(wait_seconds)
     assert len(proposed_rules) == len(llm_inputs)
     if verbose:
         print("FUNCTION FINISHED: {}".format(time.strftime("%Y-%m-%d %H:%M")))
